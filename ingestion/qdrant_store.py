@@ -1,0 +1,125 @@
+"""Stage 5 — Qdrant collection schema + idempotent upsert.
+
+Three named vectors per point:
+  - dense   (1024-dim, COSINE, HNSW on)  -- primary semantic search
+  - sparse  (BGE-M3 lexical weights)     -- keyword-style matching
+  - colbert (128-dim multivector, COSINE, MAX_SIM, HNSW off) -- rerank only
+
+Point IDs are a deterministic hash of writer+book+paper+chapter+chunk-index,
+so re-running ingestion for one book overwrites its own points cleanly
+without touching any other writer/book (this is what makes incremental,
+per-writer/per-book ingestion safe).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+
+from dotenv import load_dotenv
+from qdrant_client import QdrantClient, models
+
+from embed import ChunkEmbedding
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env.local")
+
+COLLECTION_NAME = "pattho_physics"
+DENSE_SIZE = 1024
+COLBERT_SIZE = 128
+
+
+@dataclass
+class ChunkRecord:
+    writer: str
+    book: str
+    subject: str
+    paper: str
+    chapter: str
+    topic: str
+    subtopic: str | None
+    content_type: str  # "textbook" | "board-question"
+    chunk_type: str  # "narrative" | "worked_example"
+    source_pages: list[int]
+    ocr_confidence: float | None
+    text: str
+    chunk_index: int
+
+
+def get_client() -> QdrantClient:
+    return QdrantClient(
+        url=os.environ["QDRANT_URL"],
+        api_key=os.environ["QDRANT_API_KEY"],
+    )
+
+
+def ensure_collection(client: QdrantClient) -> None:
+    if client.collection_exists(COLLECTION_NAME):
+        return
+
+    client.create_collection(
+        collection_name=COLLECTION_NAME,
+        vectors_config={
+            "dense": models.VectorParams(
+                size=DENSE_SIZE,
+                distance=models.Distance.COSINE,
+            ),
+            "colbert": models.VectorParams(
+                size=COLBERT_SIZE,
+                distance=models.Distance.COSINE,
+                multivector_config=models.MultiVectorConfig(
+                    comparator=models.MultiVectorComparator.MAX_SIM
+                ),
+                hnsw_config=models.HnswConfigDiff(m=0),  # rerank-only, no HNSW index
+            ),
+        },
+        sparse_vectors_config={
+            "sparse": models.SparseVectorParams(),
+        },
+    )
+
+
+def _point_id(record: ChunkRecord) -> str:
+    key = f"{record.writer}|{record.book}|{record.paper}|{record.chapter}|{record.chunk_index}"
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return str(uuid.UUID(digest[:32]))
+
+
+def upsert_chunks(
+    client: QdrantClient,
+    records: list[ChunkRecord],
+    embeddings: list[ChunkEmbedding],
+) -> None:
+    points = []
+    for record, embedding in zip(records, embeddings):
+        points.append(
+            models.PointStruct(
+                id=_point_id(record),
+                vector={
+                    "dense": embedding.dense,
+                    "sparse": models.SparseVector(
+                        indices=list(embedding.sparse.keys()),
+                        values=list(embedding.sparse.values()),
+                    ),
+                    "colbert": embedding.colbert,
+                },
+                payload={
+                    "writer": record.writer,
+                    "book": record.book,
+                    "subject": record.subject,
+                    "paper": record.paper,
+                    "chapter": record.chapter,
+                    "topic": record.topic,
+                    "subtopic": record.subtopic,
+                    "content_type": record.content_type,
+                    "chunk_type": record.chunk_type,
+                    "source_pages": record.source_pages,
+                    "ocr_confidence": record.ocr_confidence,
+                    "text": record.text,
+                },
+            )
+        )
+
+    client.upsert(collection_name=COLLECTION_NAME, points=points)
