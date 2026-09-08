@@ -66,16 +66,27 @@ class StructuredChunk:
     text: str
 
 
-def _is_request_too_large(error: Exception) -> bool:
+def _should_split_and_retry(error: Exception) -> bool:
     status = getattr(error, "status_code", None) or getattr(error, "status", None)
-    return status == 413
+    if status == 413:
+        return True  # request itself too large for the per-request token limit
+    if status == 400:
+        # This account's output-token ceiling is tight enough that a
+        # batch's structured-JSON completion can get truncated
+        # mid-generation even when the request itself was accepted —
+        # Groq reports this as 400 'json_validate_failed'. Smaller
+        # input -> smaller expected output -> less likely to truncate.
+        body = getattr(error, "body", None) or {}
+        code = (body.get("error") or {}).get("code") if isinstance(body, dict) else None
+        return code == "json_validate_failed"
+    return False
 
 
-def _structure_batch(batch_text: str) -> list[StructuredChunk]:
+def _structure_batch(batch_text: str, reasoning_effort: str = "medium") -> list[StructuredChunk]:
     pool = get_pool()
     raw = pool.chat(
         model=STRUCTURE_MODEL,
-        reasoning_effort="medium",
+        reasoning_effort=reasoning_effort,
         json_mode=True,
         messages=[
             {"role": "system", "content": _SYSTEM_PROMPT},
@@ -104,8 +115,9 @@ def _structure_batch(batch_text: str) -> list[StructuredChunk]:
 
 def structure_chapter(page_texts: list[str]) -> list[StructuredChunk]:
     """Structures a chapter's pages, splitting into smaller batches and
-    retrying if a batch is too large for the model's per-request token
-    limit. `page_texts` is one string per page, in reading order.
+    retrying if a batch is too large (or its expected output too long)
+    for the model's per-request limits. `page_texts` is one string per
+    page, in reading order.
     """
     if not page_texts:
         return []
@@ -115,14 +127,28 @@ def structure_chapter(page_texts: list[str]) -> list[StructuredChunk]:
     try:
         return _structure_batch(batch_text)
     except Exception as error:  # noqa: BLE001 — only split on the specific too-large case
-        if not _is_request_too_large(error) or len(page_texts) == 1:
+        if not _should_split_and_retry(error):
             raise
 
-        midpoint = len(page_texts) // 2
-        print(
-            f"    (batch of {len(page_texts)} pages too large for the model's "
-            f"per-request limit, splitting into {midpoint} + {len(page_texts) - midpoint})"
-        )
-        first_half = structure_chapter(page_texts[:midpoint])
-        second_half = structure_chapter(page_texts[midpoint:])
-        return first_half + second_half
+        if len(page_texts) > 1:
+            midpoint = len(page_texts) // 2
+            print(
+                f"    (batch of {len(page_texts)} pages too large, splitting into "
+                f"{midpoint} + {len(page_texts) - midpoint})"
+            )
+            first_half = structure_chapter(page_texts[:midpoint])
+            second_half = structure_chapter(page_texts[midpoint:])
+            return first_half + second_half
+
+        # Single page, still too large/truncating — one last try with
+        # lower reasoning effort (leaves more room for the actual
+        # completion), then give up on this page rather than crashing
+        # the whole chapter's ingestion over one pathological page.
+        try:
+            print("    (single page still failing, retrying with reasoning_effort=low)")
+            return _structure_batch(batch_text, reasoning_effort="low")
+        except Exception as retry_error:  # noqa: BLE001
+            if not _should_split_and_retry(retry_error):
+                raise
+            print("    (single page still failing after retry, skipping it)")
+            return []
