@@ -35,7 +35,7 @@ from dataclasses import dataclass
 
 from groq_client import get_pool
 
-STRUCTURE_MODEL = "openai/gpt-oss-120b"
+STRUCTURE_MODEL = "openai/gpt-oss-20b"  # Flash — higher usage limit than Complex/120b
 
 _SYSTEM_PROMPT = """You are cleaning and structuring OCR'd text from part of one chapter of a Bangladeshi HSC Physics textbook.
 
