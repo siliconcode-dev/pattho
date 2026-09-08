@@ -52,10 +52,18 @@ def get_client() -> QdrantClient:
     # prefer_grpc: ColBERT's per-token multivectors make points large, and
     # Qdrant's REST API JSON-encodes every float as decimal text (~3-4x
     # bloat vs binary) - gRPC's protobuf encoding avoids that entirely.
+    #
+    # timeout: qdrant-client defaults to a hardcoded 5s, which isn't
+    # enough for a batch of ColBERT-heavy points to finish indexing
+    # server-side, especially given the VM-to-cluster region gap
+    # (asia-southeast1 -> australia-southeast1). 60s covers normal
+    # batches; _upsert_batch still splits+retries on a timeout anyway
+    # for the rare oversized one.
     return QdrantClient(
         url=os.environ["QDRANT_URL"],
         api_key=os.environ["QDRANT_API_KEY"],
         prefer_grpc=True,
+        timeout=60,
     )
 
 
@@ -129,7 +137,7 @@ def upsert_chunks(
     _upsert_batch(client, points)
 
 
-def _is_payload_too_large(error: Exception) -> bool:
+def _should_split_and_retry(error: Exception) -> bool:
     # REST path (qdrant_client.http.exceptions.UnexpectedResponse)
     status = getattr(error, "status_code", None)
     content = getattr(error, "content", None)
@@ -144,7 +152,7 @@ def _is_payload_too_large(error: Exception) -> bool:
     if callable(code_fn) and callable(details_fn):
         code = code_fn()
         details = (details_fn() or "").lower()
-        if code is not None and code.name == "RESOURCE_EXHAUSTED":
+        if code is not None and code.name in ("RESOURCE_EXHAUSTED", "DEADLINE_EXCEEDED"):
             return True
         if "larger than allowed" in details or "message length" in details:
             return True
@@ -153,24 +161,24 @@ def _is_payload_too_large(error: Exception) -> bool:
 
 
 def _upsert_batch(client: QdrantClient, points: list) -> None:
-    """Upserts points, halving the batch and retrying if it's still too
-    large even over gRPC — ColBERT multivectors mean point size varies a
-    lot with chunk text length, so no fixed batch size is safe for every
-    book. Mirrors the same adaptive pattern used for Groq's token limit
-    in structure.py.
+    """Upserts points, halving the batch and retrying on a too-large
+    payload or a timeout — ColBERT multivectors mean point size (and
+    server-side indexing time) varies a lot with chunk text length, so
+    no fixed batch size is safe for every book. Mirrors the same
+    adaptive pattern used for Groq's token limit in structure.py.
     """
     if not points:
         return
 
     try:
         client.upsert(collection_name=COLLECTION_NAME, points=points)
-    except Exception as error:  # noqa: BLE001 — only split on the specific too-large case
-        if not _is_payload_too_large(error) or len(points) == 1:
+    except Exception as error:  # noqa: BLE001 — only split on the specific too-large/timeout case
+        if not _should_split_and_retry(error) or len(points) == 1:
             raise
 
         midpoint = len(points) // 2
         print(
-            f"    (upsert batch of {len(points)} points too large, splitting into "
+            f"    (upsert batch of {len(points)} points too large/slow, splitting into "
             f"{midpoint} + {len(points) - midpoint})"
         )
         _upsert_batch(client, points[:midpoint])
