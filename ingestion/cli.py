@@ -18,6 +18,7 @@ import argparse
 import json
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,10 +26,15 @@ from extract import extract_pages
 from ocr import ocr_page
 from qdrant_store import ChunkRecord, ensure_collection, get_client, upsert_chunks
 from embed import embed_chunks
-from structure import structure_pages
+from structure import structure_chapter
 
 LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
 LOW_CONFIDENCE_THRESHOLD = 0.6
+
+# Vision API calls are network-bound, not CPU-bound — OCR pages
+# concurrently rather than one at a time. 10 is comfortably under
+# Vision API's default per-project QPS limits for a solo pilot.
+OCR_CONCURRENCY = 10
 
 # Matches "02. ভেক্টর - দাগানো বই.pdf" -> chapter number "02", title "ভেক্টর".
 # Falls back to the bare filename stem if a PDF doesn't follow this
@@ -45,31 +51,35 @@ def chapter_name_from_filename(pdf_path: Path) -> str:
     return f"{number}. {title}"
 
 
-def _extract_pdf_text(pdf_path: Path) -> tuple[str, list[dict]]:
-    """Returns (concatenated page text, per-page confidence log entries) for one PDF."""
-    page_texts: list[str] = []
-    confidence_log: list[dict] = []
+def _extract_pdf_text(pdf_path: Path) -> tuple[str, list[dict], list[int]]:
+    """Returns (concatenated page text, per-page confidence log entries,
+    page numbers) for one PDF. Pages needing OCR are sent to Vision API
+    concurrently (network-bound, not CPU-bound) rather than one at a time.
+    """
+    pages = extract_pages(pdf_path)
 
-    for page in extract_pages(pdf_path):
+    def resolve_page(page):
         if page.needs_ocr and page.image_bytes:
             ocr_result = ocr_page(page.image_bytes)
-            text = ocr_result.text
-            confidence = ocr_result.confidence
-        else:
-            text = page.text or ""
-            confidence = 1.0  # native text layer, no OCR uncertainty
+            return ocr_result.text, ocr_result.confidence
+        return page.text or "", 1.0  # native text layer, no OCR uncertainty
 
-        page_texts.append(text)
-        confidence_log.append(
-            {
-                "file": pdf_path.name,
-                "page": page.page_number,
-                "confidence": confidence,
-                "low_confidence": confidence < LOW_CONFIDENCE_THRESHOLD,
-            }
-        )
+    with ThreadPoolExecutor(max_workers=OCR_CONCURRENCY) as pool:
+        resolved = list(pool.map(resolve_page, pages))
 
-    return "\n\n".join(page_texts), confidence_log
+    page_texts = [text for text, _ in resolved]
+    confidence_log = [
+        {
+            "file": pdf_path.name,
+            "page": page.page_number,
+            "confidence": confidence,
+            "low_confidence": confidence < LOW_CONFIDENCE_THRESHOLD,
+        }
+        for page, (_, confidence) in zip(pages, resolved)
+    ]
+    page_numbers = [page.page_number for page in pages]
+
+    return "\n\n".join(page_texts), confidence_log, page_numbers
 
 
 def _write_confidence_log(writer: str, book: str, entries: list[dict]) -> None:
@@ -106,7 +116,7 @@ def _ingest_pdfs(
     for pdf_path in pdf_paths:
         chapter = chapter_name_from_filename(pdf_path)
         print(f"[{chapter}] Extracting text from {pdf_path.name}...")
-        chapter_text, confidence_log = _extract_pdf_text(pdf_path)
+        chapter_text, confidence_log, page_numbers = _extract_pdf_text(pdf_path)
         all_confidence_entries.extend(confidence_log)
 
         print(f"[{chapter}] Running structuring pass (Groq)...")
@@ -135,7 +145,7 @@ def _ingest_pdfs(
                 subtopic=chunk.subtopic,
                 content_type=content_type,
                 chunk_type=chunk.chunk_type,
-                source_pages=[p.page_number for p in extract_pages(pdf_path)],
+                source_pages=page_numbers,
                 ocr_confidence=chapter_confidence,
                 text=chunk.text,
                 chunk_index=i,
