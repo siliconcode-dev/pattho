@@ -24,7 +24,7 @@ from pathlib import Path
 
 from extract import extract_pages
 from ocr import ocr_page
-from lancedb_store import ChunkRecord, delete_chapter, ensure_table, get_db, upsert_chunks
+from weaviate_store import ChunkRecord, delete_chapter, ensure_collection, get_client, upsert_chunks
 from embed import embed_chunks
 from structure import structure_chapter
 
@@ -107,61 +107,64 @@ def _ingest_pdfs(
     structuring call, so a book's ~10 chapters never get crammed into
     one oversized prompt.
     """
-    db = get_db()
-    table = ensure_table(db)
+    client = get_client()
+    try:
+        ensure_collection(client)
 
-    all_confidence_entries: list[dict] = []
-    total_chunks = 0
+        all_confidence_entries: list[dict] = []
+        total_chunks = 0
 
-    for pdf_path in pdf_paths:
-        chapter = chapter_name_from_filename(pdf_path)
-        print(f"[{chapter}] Extracting text from {pdf_path.name}...")
-        page_texts, confidence_log, page_numbers = _extract_pdf_text(pdf_path)
-        all_confidence_entries.extend(confidence_log)
+        for pdf_path in pdf_paths:
+            chapter = chapter_name_from_filename(pdf_path)
+            print(f"[{chapter}] Extracting text from {pdf_path.name}...")
+            page_texts, confidence_log, page_numbers = _extract_pdf_text(pdf_path)
+            all_confidence_entries.extend(confidence_log)
 
-        print(f"[{chapter}] Running structuring pass (Groq)...")
-        chunks = structure_chapter(list(zip(page_numbers, page_texts)))
-        print(f"[{chapter}] {len(chunks)} chunks produced")
+            print(f"[{chapter}] Running structuring pass (Groq)...")
+            chunks = structure_chapter(list(zip(page_numbers, page_texts)))
+            print(f"[{chapter}] {len(chunks)} chunks produced")
 
-        if not chunks:
-            continue
+            if not chunks:
+                continue
 
-        print(f"[{chapter}] Embedding chunks (BGE-M3)...")
-        embeddings = embed_chunks([c.text for c in chunks])
+            print(f"[{chapter}] Embedding chunks (BGE-M3)...")
+            embeddings = embed_chunks([c.text for c in chunks])
 
-        page_confidences = [e["confidence"] for e in confidence_log]
-        chapter_confidence = (
-            sum(page_confidences) / len(page_confidences) if page_confidences else None
-        )
-
-        records = [
-            ChunkRecord(
-                writer=writer,
-                book=book,
-                subject="Physics",
-                paper=paper,
-                chapter=chapter,
-                topic=chunk.topic,
-                subtopic=chunk.subtopic,
-                content_type=content_type,
-                chunk_type=chunk.chunk_type,
-                source_pages=chunk.source_pages or page_numbers,
-                ocr_confidence=chapter_confidence,
-                text=chunk.text,
-                chunk_index=i,
+            page_confidences = [e["confidence"] for e in confidence_log]
+            chapter_confidence = (
+                sum(page_confidences) / len(page_confidences) if page_confidences else None
             )
-            for i, chunk in enumerate(chunks)
-        ]
 
-        print(f"[{chapter}] Clearing any existing rows for this chapter...")
-        delete_chapter(table, writer, book, paper, chapter)
+            records = [
+                ChunkRecord(
+                    writer=writer,
+                    book=book,
+                    subject="Physics",
+                    paper=paper,
+                    chapter=chapter,
+                    topic=chunk.topic,
+                    subtopic=chunk.subtopic,
+                    content_type=content_type,
+                    chunk_type=chunk.chunk_type,
+                    source_pages=chunk.source_pages or page_numbers,
+                    ocr_confidence=chapter_confidence,
+                    text=chunk.text,
+                    chunk_index=i,
+                )
+                for i, chunk in enumerate(chunks)
+            ]
 
-        print(f"[{chapter}] Writing {len(records)} chunks to LanceDB...")
-        upsert_chunks(table, records, embeddings)
-        total_chunks += len(records)
+            print(f"[{chapter}] Clearing any existing objects for this chapter...")
+            delete_chapter(client, writer, book, paper, chapter)
 
-    _write_confidence_log(log_name, book, all_confidence_entries)
-    return total_chunks
+            print(f"[{chapter}] Writing {len(records)} chunks to Weaviate...")
+            upsert_chunks(client, records, embeddings)
+            total_chunks += len(records)
+
+        _write_confidence_log(log_name, book, all_confidence_entries)
+        return total_chunks
+    finally:
+        client.close()
 
 
 def cmd_ingest(args: argparse.Namespace) -> None:

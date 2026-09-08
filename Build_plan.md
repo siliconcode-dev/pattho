@@ -20,9 +20,9 @@ Pilot content scope for the whole plan: **HSC Science group, Physics 1st & 2nd P
 
 ## Phase 1 — Content Ingestion Pipeline
 
-**Goal:** turn the Physics PDFs (multiple writers, both papers) into searchable, metadata-tagged vectors in LanceDB.
+**Goal:** turn the Physics PDFs (multiple writers, both papers) into searchable, metadata-tagged vectors in Weaviate Cloud.
 
-*(2026-09-08: migrated off Qdrant Cloud, set up in Phase 0 — its 4GB free-tier disk couldn't hold the full corpus once ColBERT's per-token multivectors were accounted for, and self-hosting a bigger Qdrant on an Oracle Always Free VM was blocked by regional ARM capacity shortage. LanceDB is an embedded library that writes straight to Backblaze B2 object storage — 10GB free forever, no card required, no server/capacity to run out of. See `ingestion/lancedb_store.py`.)*
+*(2026-09-08: migrated off Qdrant Cloud, set up in Phase 0 — its 4GB free-tier disk couldn't hold the full corpus once ColBERT's per-token multivectors were accounted for. Self-hosting a bigger Qdrant on an Oracle Always Free VM was blocked by regional ARM capacity shortage, and a LanceDB-on-object-storage alternative hit real dead ends (Cloudflare R2 needs a card, Backblaze B2 lacks the conditional-PUT support Lance's commit protocol requires, Google Cloud Storage risks billing the founder's live card). Weaviate Cloud's free tier — genuinely permanent since Oct 2025 — is a hosted cluster like Qdrant was: no card, 10GB disk, native hybrid search + ColBERT multivector support. See `ingestion/weaviate_store.py`.)*
 
 - Build the OCR step to run on the GCP VM: input Physics PDFs, output cleaned text. Use OCR + an LLM-based cleanup pass (per Masterdoc §3 — no human QA step required, but log confidence/uncertainty per page so problems are traceable later).
 - Confirm/lock the embedding model — **BGE-M3** is the recommended default (multilingual, MIT-licensed, hybrid dense/sparse). Swap if you find a clearly better fit during testing, but don't leave this undecided past this phase.
@@ -30,14 +30,14 @@ Pilot content scope for the whole plan: **HSC Science group, Physics 1st & 2nd P
 - Implement the **per-chunk metadata schema**: writer/book, subject, paper, chapter, content-type (textbook vs. board-question).
 - Source and ingest **past HSC board exam questions** for Physics alongside the textbook content, tagged with `content-type: board-question`.
 - Build the ingestion pipeline as a **CLI script the founder runs manually for now** (fastest path to unblock later phases) — flag clearly in code/comments that an admin dashboard is an open item (Masterdoc §12) that may replace this later. Don't over-invest in the CLI's UX.
-- Wire up the GCP VM boot-up → run pipeline → write to LanceDB (B2) → spin-down flow end-to-end.
-- **Checkpoint:** query the LanceDB table directly (outside the app) for a known Physics topic and confirm the right chunks, from the right writers, with correct metadata, come back.
+- Wire up the GCP VM boot-up → run pipeline → write to Weaviate Cloud → spin-down flow end-to-end.
+- **Checkpoint:** query the Weaviate collection directly (outside the app) for a known Physics topic and confirm the right chunks, from the right writers, with correct metadata, come back.
 
 ## Phase 2 — RAG + Answer Engine
 
 **Goal:** a working backend that takes a student question and returns a grounded, cited, streamed answer.
 
-- Build retrieval: query → embed → LanceDB search (dense + BM25 FTS, ColBERT rerank) → assemble context, respecting the metadata schema (e.g., filter by subject/paper when known).
+- Build retrieval: query → embed → Weaviate search (hybrid dense+BM25, ColBERT multivector rerank) → assemble context, respecting the metadata schema (e.g., filter by subject/paper when known).
 - Implement the **Flash/Complex model split**: `openai/gpt-oss-20b` for Flash, `openai/gpt-oss-120b` for Complex, both user-selectable.
 - Implement **adaptive `reasoning_effort`** (low/medium/high) based on question complexity — don't hardcode one level.
 - Do **not** add explicit chain-of-thought prompting ("think step by step") — rely on `reasoning_effort` and let the model reason internally per Masterdoc §4.

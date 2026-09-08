@@ -36,7 +36,7 @@ Use `reasoning_effort: low/medium/high` adaptively on both, based on question co
 - Frontend: Next.js on Vercel (free tier)
 - UI: Shadcn components (favor Magic UI's component set specifically), Anime.js v4 for animation
 - Auth/relational/storage: Supabase
-- Vector DB: LanceDB (embedded library, not a hosted service) on Backblaze B2 object storage (10GB free, no card) — replaced Qdrant Cloud 2026-09-08 (4GB free-tier disk too small for the full corpus's ColBERT multivectors; Oracle Always Free self-host blocked by regional ARM capacity shortage). No inactivity-pause risk since there's no server to idle — the earlier keep-alive-cron concern is moot.
+- Vector DB: Weaviate Cloud (free tier: 10GB, 100k objects, no card, permanent since Oct 2025) — replaced Qdrant Cloud 2026-09-08 (4GB free-tier disk too small for the full corpus's ColBERT multivectors). Both an Oracle Always Free self-host (blocked by regional ARM capacity) and a LanceDB-on-object-storage move (R2 needs a card, B2 lacks required conditional-PUT support, GCS risks real billing) were tried and abandoned first. Native hybrid search + ColBERT multivector support, so no bring-your-own sparse vectors needed.
 - Embedding model: BGE-M3 (default recommendation — confirm before Phase 1 locks it in)
 - OCR/embedding compute: GCP VM, 4 CPU/12GB RAM, boot-on-demand only — never leave it running idle
 - Backend language/framework: Next.js API routes (TypeScript) for the live chat/RAG path; Python for the GCP VM OCR/embedding ingestion job (Phase 1) — decided at Phase 0 kickoff

@@ -1,29 +1,30 @@
 # Ingestion pipeline
 
 Turns Physics PDFs (multiple writers, both papers) into metadata-tagged
-vectors in LanceDB (on Backblaze B2). See `../Build_plan.md` Phase 1 and
-the plan history for full context.
+vectors in Weaviate Cloud. See `../Build_plan.md` Phase 1 and the plan
+history for full context.
 
-## B2 + LanceDB setup (one-time)
+## Weaviate Cloud setup (one-time)
 
-LanceDB is an embedded library, not a hosted service — there's no account
-to sign up for beyond the storage backend it writes to. We use Backblaze
-B2 (10GB free forever, no credit card required, free egress), replacing
-Qdrant Cloud 2026-09-08 after its 4GB free-tier disk proved too small for
-ColBERT's per-token multivectors (~1.2MB/chunk); Oracle's Always Free ARM
-tier had no self-host capacity in-region, and Cloudflare R2 (the first
-alternative considered) requires a card on file even to stay free. See
-`lancedb_store.py`'s docstring.
+Third vector-store choice for this phase (2026-09-08) — Qdrant Cloud's
+4GB free-tier disk ran out once ColBERT's per-token multivectors were
+counted (~1.2MB/chunk), and a LanceDB (embedded, object-storage-backed)
+alternative hit real dead ends: Cloudflare R2 needs a card on file,
+Backblaze B2's S3-compatible API doesn't support the conditional-PUT
+writes LanceDB's commit protocol requires, and Google Cloud Storage
+would bill the founder's live GCP card on any overage. Weaviate Cloud's
+free tier (genuinely permanent since Oct 2025, not the old 14-day
+sandbox) is a hosted cluster like Qdrant was — no credit card, 10GB
+disk, 100k objects — with native hybrid (dense+BM25) search and
+ColBERT-style multivector MaxSim built in, so there's no storage-backend
+compatibility risk at all. See `weaviate_store.py`'s docstring.
 
-1. Sign up at backblaze.com/sign-up/cloud-storage (no card needed).
-2. Create a bucket (e.g. `pattho-vectors`) — note the region shown
-   (e.g. `us-west-004`).
-3. App Keys page → Add a New Application Key, scoped to that bucket,
-   Read and Write. Copy the `keyID` and `applicationKey` — the key is
-   only shown once.
-4. Endpoint is `https://s3.<region>.backblazeb2.com`.
-5. Fill in `LANCEDB_URI`, `B2_ENDPOINT`, `B2_REGION`, `B2_KEY_ID`,
-   `B2_APPLICATION_KEY` in the repo root's `.env.local`.
+1. Sign up at console.weaviate.cloud (no card needed).
+2. Create a cluster (Database → Create a cluster → free Sandbox tier).
+3. Once it's running, copy the **REST endpoint URL** and the **Admin
+   API key** from the cluster's details page.
+4. Fill in `WEAVIATE_URL` and `WEAVIATE_API_KEY` in the repo root's
+   `.env.local`.
 
 ## Local setup
 
@@ -34,9 +35,9 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Reads Groq/LanceDB(B2) credentials from the repo root's `.env.local` (same
-file Phase 0's Next.js app uses) — nothing extra to configure, once the B2
-setup above is done.
+Reads Groq/Weaviate credentials from the repo root's `.env.local` (same
+file Phase 0's Next.js app uses) — nothing extra to configure, once the
+Weaviate setup above is done.
 
 ## Running
 
@@ -46,10 +47,10 @@ python cli.py ingest-board-questions --paper 1st --path ../Data-Source/Board-Que
 ```
 
 Re-running `ingest` for the same writer/book/paper/chapter is safe — each
-chapter's existing rows are deleted before its fresh chunks are inserted
-(the structuring LLM call isn't guaranteed to produce the same chunk
-count/order every run, so a delete-then-add is what makes this safe, not
-just a stable row ID).
+chapter's existing objects are deleted before its fresh chunks are
+inserted (the structuring LLM call isn't guaranteed to produce the same
+chunk count/order every run, so a delete-then-insert is what makes this
+safe, not just a stable object UUID).
 
 Each run writes a per-page OCR confidence log to `../logs/`.
 
@@ -78,7 +79,7 @@ off a large batch if you're not sure there's headroom left.
 | 2. OCR | `ocr.py` | Google Cloud Vision (DOCUMENT_TEXT_DETECTION) — see `GCP_RUNBOOK.md` for one-time setup |
 | 3. Structure | `structure.py` | Groq cleanup + topic/subtopic/worked-example segmentation (chapter comes from the source filename) |
 | 4. Embed | `embed.py` | BGE-M3 dense + ColBERT (no sparse — see file docstring) |
-| 5. Store | `lancedb_store.py` | Table schema + idempotent write, on Backblaze B2 |
+| 5. Store | `weaviate_store.py` | Collection schema + idempotent upsert, on Weaviate Cloud |
 
 OCR was originally planned as self-hosted (PaddleOCR, then EasyOCR), but
 real testing showed EasyOCR ran ~90s/page on CPU — impractical at pilot
