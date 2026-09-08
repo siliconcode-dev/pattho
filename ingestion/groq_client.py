@@ -64,7 +64,10 @@ class GroqKeyPool:
         status = getattr(error, "status_code", None) or getattr(error, "status", None)
         if status is None:
             return True  # network errors carry no status — treat as retryable
-        return status != 400
+        # 400 (malformed request) and 413 (request too large for the
+        # model's per-request token limit) are properties of the
+        # request itself — a different key won't fix either one.
+        return status not in (400, 413)
 
     def chat(
         self,

@@ -51,9 +51,9 @@ def chapter_name_from_filename(pdf_path: Path) -> str:
     return f"{number}. {title}"
 
 
-def _extract_pdf_text(pdf_path: Path) -> tuple[str, list[dict], list[int]]:
-    """Returns (concatenated page text, per-page confidence log entries,
-    page numbers) for one PDF. Pages needing OCR are sent to Vision API
+def _extract_pdf_text(pdf_path: Path) -> tuple[list[str], list[dict], list[int]]:
+    """Returns (per-page text, per-page confidence log entries, page
+    numbers) for one PDF. Pages needing OCR are sent to Vision API
     concurrently (network-bound, not CPU-bound) rather than one at a time.
     """
     pages = extract_pages(pdf_path)
@@ -79,7 +79,7 @@ def _extract_pdf_text(pdf_path: Path) -> tuple[str, list[dict], list[int]]:
     ]
     page_numbers = [page.page_number for page in pages]
 
-    return "\n\n".join(page_texts), confidence_log, page_numbers
+    return page_texts, confidence_log, page_numbers
 
 
 def _write_confidence_log(writer: str, book: str, entries: list[dict]) -> None:
@@ -116,11 +116,11 @@ def _ingest_pdfs(
     for pdf_path in pdf_paths:
         chapter = chapter_name_from_filename(pdf_path)
         print(f"[{chapter}] Extracting text from {pdf_path.name}...")
-        chapter_text, confidence_log, page_numbers = _extract_pdf_text(pdf_path)
+        page_texts, confidence_log, page_numbers = _extract_pdf_text(pdf_path)
         all_confidence_entries.extend(confidence_log)
 
         print(f"[{chapter}] Running structuring pass (Groq)...")
-        chunks = structure_chapter(chapter_text)
+        chunks = structure_chapter(page_texts)
         print(f"[{chapter}] {len(chunks)} chunks produced")
 
         if not chunks:
