@@ -108,6 +108,25 @@ def ensure_collection(client: weaviate.WeaviateClient) -> None:
     )
 
 
+def chapter_exists(client: weaviate.WeaviateClient, writer: str, book: str, paper: str, chapter: str) -> bool:
+    """Used to make bulk ingestion resumable at chapter granularity: Groq's
+    daily quota can run out mid-batch (a real, observed failure mode — see
+    GCP_RUNBOOK.md), and re-running from chapter 1 every retry would waste
+    scarce tokens re-structuring chapters that already succeeded.
+    """
+    collection = client.collections.use(COLLECTION_NAME)
+    result = collection.aggregate.over_all(
+        filters=(
+            Filter.by_property("writer").equal(writer)
+            & Filter.by_property("book").equal(book)
+            & Filter.by_property("paper").equal(paper)
+            & Filter.by_property("chapter").equal(chapter)
+        ),
+        total_count=True,
+    )
+    return result.total_count > 0
+
+
 def delete_chapter(client: weaviate.WeaviateClient, writer: str, book: str, paper: str, chapter: str) -> None:
     """Removes every existing object for this exact writer/book/paper/chapter
     before a fresh ingestion run inserts its replacement chunks — see the

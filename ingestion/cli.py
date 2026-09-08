@@ -24,7 +24,7 @@ from pathlib import Path
 
 from extract import extract_pages
 from ocr import ocr_page
-from weaviate_store import ChunkRecord, delete_chapter, ensure_collection, get_client, upsert_chunks
+from weaviate_store import ChunkRecord, chapter_exists, delete_chapter, ensure_collection, get_client, upsert_chunks
 from embed import embed_chunks
 from structure import structure_chapter
 
@@ -100,12 +100,21 @@ def _ingest_pdfs(
     paper: str,
     content_type: str,
     log_name: str,
+    skip_existing: bool = False,
 ) -> int:
     """Shared per-chapter pipeline for both `ingest` and
     `ingest-board-questions`. Each PDF is treated as one chapter — its
     name comes from the filename, not the LLM — and gets its own
     structuring call, so a book's ~10 chapters never get crammed into
     one oversized prompt.
+
+    `skip_existing` makes a re-run resumable at chapter granularity
+    instead of always reprocessing — needed because Groq's daily quota
+    can run out mid-batch, and a blind restart-from-chapter-1 wastes
+    scarce tokens re-structuring chapters that already succeeded (see
+    GCP_RUNBOOK.md). Off by default so a deliberate re-run after fixing
+    the OCR/structuring code still regenerates every chapter, matching
+    the pre-existing always-reprocess behavior.
     """
     client = get_client()
     try:
@@ -116,6 +125,11 @@ def _ingest_pdfs(
 
         for pdf_path in pdf_paths:
             chapter = chapter_name_from_filename(pdf_path)
+
+            if skip_existing and chapter_exists(client, writer, book, paper, chapter):
+                print(f"[{chapter}] Already ingested, skipping (--skip-existing)")
+                continue
+
             print(f"[{chapter}] Extracting text from {pdf_path.name}...")
             page_texts, confidence_log, page_numbers = _extract_pdf_text(pdf_path)
             all_confidence_entries.extend(confidence_log)
@@ -181,6 +195,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
         paper=args.paper,
         content_type="textbook",
         log_name=args.writer,
+        skip_existing=args.skip_existing,
     )
     print(f"Done. {total} chunks upserted for {args.writer} / {args.book} ({args.paper}) across {len(pdf_paths)} chapter(s).")
 
@@ -199,6 +214,7 @@ def cmd_ingest_board_questions(args: argparse.Namespace) -> None:
         paper=args.paper,
         content_type="board-question",
         log_name="board-questions",
+        skip_existing=args.skip_existing,
     )
     print(f"Done. {total} board-question chunks upserted ({args.paper}).")
 
@@ -212,11 +228,16 @@ def main() -> None:
     ingest.add_argument("--book", required=True)
     ingest.add_argument("--paper", required=True, choices=["1st", "2nd"])
     ingest.add_argument("--path", required=True, help="Folder containing this book's PDFs")
+    ingest.add_argument(
+        "--skip-existing", action="store_true",
+        help="Skip chapters already ingested instead of reprocessing them — for resuming a batch interrupted by Groq quota exhaustion",
+    )
     ingest.set_defaults(func=cmd_ingest)
 
     board = subparsers.add_parser("ingest-board-questions", help="Ingest past HSC board questions")
     board.add_argument("--paper", required=True, choices=["1st", "2nd"])
     board.add_argument("--path", required=True, help="Folder containing board-question PDFs")
+    board.add_argument("--skip-existing", action="store_true", help="Skip chapters already ingested instead of reprocessing them")
     board.set_defaults(func=cmd_ingest_board_questions)
 
     args = parser.parse_args()
