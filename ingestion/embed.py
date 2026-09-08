@@ -18,7 +18,7 @@ MODEL_NAME = "BAAI/bge-m3"
 class ChunkEmbedding:
     dense: list[float]
     sparse: dict[int, float]  # token-id -> weight
-    colbert: list[list[float]]  # one 128-dim vector per token
+    colbert: list[list[float]]  # one 1024-dim vector per token
 
 
 @lru_cache(maxsize=1)

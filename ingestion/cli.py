@@ -24,7 +24,7 @@ from pathlib import Path
 
 from extract import extract_pages
 from ocr import ocr_page
-from qdrant_store import ChunkRecord, ensure_collection, get_client, upsert_chunks
+from qdrant_store import ChunkRecord, delete_chapter, ensure_collection, get_client, upsert_chunks
 from embed import embed_chunks
 from structure import structure_chapter
 
@@ -120,7 +120,7 @@ def _ingest_pdfs(
         all_confidence_entries.extend(confidence_log)
 
         print(f"[{chapter}] Running structuring pass (Groq)...")
-        chunks = structure_chapter(page_texts)
+        chunks = structure_chapter(list(zip(page_numbers, page_texts)))
         print(f"[{chapter}] {len(chunks)} chunks produced")
 
         if not chunks:
@@ -145,13 +145,16 @@ def _ingest_pdfs(
                 subtopic=chunk.subtopic,
                 content_type=content_type,
                 chunk_type=chunk.chunk_type,
-                source_pages=page_numbers,
+                source_pages=chunk.source_pages or page_numbers,
                 ocr_confidence=chapter_confidence,
                 text=chunk.text,
                 chunk_index=i,
             )
             for i, chunk in enumerate(chunks)
         ]
+
+        print(f"[{chapter}] Clearing any existing points for this chapter...")
+        delete_chapter(client, writer, book, paper, chapter)
 
         print(f"[{chapter}] Upserting {len(records)} chunks to Qdrant...")
         upsert_chunks(client, records, embeddings)

@@ -4,10 +4,15 @@ Feeds one chapter's raw page-by-page text (native-extracted and/or
 OCR'd, in reading order) through Groq to: (a) clean up OCR noise /
 garbled Bangla+math, (b) segment it into topic -> sub-topic ->
 worked-example, per Build_plan.md's chapter -> topic -> sub-topic ->
-worked-example hierarchy. Chapter itself is supplied by the caller
-(derived from the source PDF's filename, one PDF per chapter) rather
-than detected by the model — a chapter boundary is a fact about the
-file, not something worth spending model judgment on.
+worked-example hierarchy, and (c) tag each chunk with which page(s) it
+came from — pages are marked in the prompt (`[Page N]`) and the model
+is asked to report them back per chunk, which is what makes the
+Source Reader citation feature (Masterdoc §5) actually point at a
+page instead of "somewhere in this chapter". Chapter itself is
+supplied by the caller (derived from the source PDF's filename, one
+PDF per chapter) rather than detected by the model — a chapter
+boundary is a fact about the file, not something worth spending model
+judgment on.
 
 A full chapter's OCR'd text can easily exceed this Groq account's
 per-request token limit (observed: 8,000 TPM cap on
@@ -36,7 +41,8 @@ _SYSTEM_PROMPT = """You are cleaning and structuring OCR'd text from part of one
 
 The input is raw page text (Bangla, English, or mixed) that may contain OCR noise,
 garbled math notation, and broken line breaks from page extraction. It may be a
-partial excerpt of the chapter rather than the whole thing.
+partial excerpt of the chapter rather than the whole thing. Each page is marked
+with a "[Page N]" line before its text.
 
 Your job:
 1. Clean up obvious OCR errors while preserving the original meaning and language
@@ -47,6 +53,9 @@ Your job:
 3. Segment the cleaned text into topic -> sub-topic -> worked example, based on
    headings, numbering, and content shifts visible in the text. Do not invent a
    chapter field — the caller already knows the chapter.
+4. For each chunk, report which page number(s) its content came from, using the
+   "[Page N]" markers — most chunks come from one page, but a chunk that spans a
+   page break should list all the pages it touches.
 
 Respond with a JSON object of the form {"chunks": [...]}, where each array
 element is:
@@ -54,6 +63,7 @@ element is:
   "topic": string,
   "subtopic": string | null,
   "chunk_type": "narrative" | "worked_example",
+  "source_pages": [int, ...],
   "text": string
 }"""
 
@@ -63,6 +73,7 @@ class StructuredChunk:
     topic: str
     subtopic: str | None
     chunk_type: str
+    source_pages: list[int]
     text: str
 
 
@@ -115,6 +126,7 @@ def _structure_batch(batch_text: str, reasoning_effort: str = "medium") -> list[
                 topic=item["topic"],
                 subtopic=item.get("subtopic"),
                 chunk_type=item["chunk_type"],
+                source_pages=[int(p) for p in item.get("source_pages", [])],
                 text=item["text"],
             )
             for item in parsed
@@ -126,16 +138,18 @@ def _structure_batch(batch_text: str, reasoning_effort: str = "medium") -> list[
         ) from error
 
 
-def structure_chapter(page_texts: list[str]) -> list[StructuredChunk]:
+def structure_chapter(pages: list[tuple[int, str]]) -> list[StructuredChunk]:
     """Structures a chapter's pages, splitting into smaller batches and
     retrying if a batch is too large (or its expected output too long)
-    for the model's per-request limits. `page_texts` is one string per
-    page, in reading order.
+    for the model's per-request limits. `pages` is a list of
+    (page_number, page_text) in reading order — real page numbers are
+    threaded through (not list position) so a recursively-split
+    sub-batch still tags chunks with their true page numbers.
     """
-    if not page_texts:
+    if not pages:
         return []
 
-    batch_text = "\n\n".join(page_texts)
+    batch_text = "\n\n".join(f"[Page {number}]\n{text}" for number, text in pages)
 
     try:
         return _structure_batch(batch_text)
@@ -143,14 +157,14 @@ def structure_chapter(page_texts: list[str]) -> list[StructuredChunk]:
         if not _should_split_and_retry(error):
             raise
 
-        if len(page_texts) > 1:
-            midpoint = len(page_texts) // 2
+        if len(pages) > 1:
+            midpoint = len(pages) // 2
             print(
-                f"    (batch of {len(page_texts)} pages too large, splitting into "
-                f"{midpoint} + {len(page_texts) - midpoint})"
+                f"    (batch of {len(pages)} pages too large, splitting into "
+                f"{midpoint} + {len(pages) - midpoint})"
             )
-            first_half = structure_chapter(page_texts[:midpoint])
-            second_half = structure_chapter(page_texts[midpoint:])
+            first_half = structure_chapter(pages[:midpoint])
+            second_half = structure_chapter(pages[midpoint:])
             return first_half + second_half
 
         # Single page, still too large/truncating — one last try with

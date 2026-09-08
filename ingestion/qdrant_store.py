@@ -3,12 +3,17 @@
 Three named vectors per point:
   - dense   (1024-dim, COSINE, HNSW on)  -- primary semantic search
   - sparse  (BGE-M3 lexical weights)     -- keyword-style matching
-  - colbert (128-dim multivector, COSINE, MAX_SIM, HNSW off) -- rerank only
+  - colbert (1024-dim multivector, COSINE, MAX_SIM, HNSW off) -- rerank only
 
-Point IDs are a deterministic hash of writer+book+paper+chapter+chunk-index,
-so re-running ingestion for one book overwrites its own points cleanly
-without touching any other writer/book (this is what makes incremental,
-per-writer/per-book ingestion safe).
+Idempotency: point IDs are a deterministic hash of
+writer+book+paper+chapter+chunk-index, but that alone isn't a full
+guarantee — the structuring LLM call isn't guaranteed to produce the
+exact same number/order of chunks on a re-run, so positional chunk
+indices could map to different content between runs, or a re-run
+with fewer chunks could leave old extras orphaned. `delete_chapter`
+makes re-ingestion actually safe: it clears every point already
+tagged with that writer/book/paper/chapter before the fresh batch is
+inserted, so a chapter's old points never linger.
 """
 
 from __future__ import annotations
@@ -94,6 +99,27 @@ def ensure_collection(client: QdrantClient) -> None:
         sparse_vectors_config={
             "sparse": models.SparseVectorParams(),
         },
+    )
+
+
+def delete_chapter(client: QdrantClient, writer: str, book: str, paper: str, chapter: str) -> None:
+    """Removes every existing point for this exact writer/book/paper/chapter
+    before a fresh ingestion run inserts its replacement chunks — see the
+    idempotency note in the module docstring for why this is needed on top
+    of the deterministic point IDs.
+    """
+    client.delete(
+        collection_name=COLLECTION_NAME,
+        points_selector=models.FilterSelector(
+            filter=models.Filter(
+                must=[
+                    models.FieldCondition(key="writer", match=models.MatchValue(value=writer)),
+                    models.FieldCondition(key="book", match=models.MatchValue(value=book)),
+                    models.FieldCondition(key="paper", match=models.MatchValue(value=paper)),
+                    models.FieldCondition(key="chapter", match=models.MatchValue(value=chapter)),
+                ]
+            )
+        ),
     )
 
 
