@@ -1,21 +1,30 @@
 """Groq API key rotation pool for the ingestion pipeline.
 
 Python port of ../src/lib/groq/client.ts — keep the retry/rotation
-behavior in sync between the two, modulo one deliberate divergence: this
-account's rate/size limits (observed: 8,000 TPM on openai/gpt-oss-120b)
-are enforced per-organization, shared across every key, not per-key.
-That changes what "retry across keys" actually means here:
+behavior in sync between the two.
+
+Verified empirically (2026-09-08) rather than assumed: of the 6 keys,
+4 belong to 4 distinct Groq organizations and the other 2 share a
+5th org — so this pool is backed by 5 independent daily quotas, not
+one shared pool and not 6 separate ones. Rotating across keys on a
+429 is therefore the right strategy (an earlier version of this file
+incorrectly assumed one org shared by all 6 keys, based on reading a
+single error message without checking whether other keys resolved to
+different orgs — they do).
 
 - 400 (malformed request) and 413 (request too large for the model's
   per-request limit) are properties of the request itself — no key
   fixes either, so these propagate immediately.
-- 401/403 (bad/revoked key) and 404 are genuinely per-key — rotating
-  works as intended.
-- 429 (rate limit) is per-organization here, so rotating to another key
-  usually just hits the same exhausted shared budget. If a full pass
-  finds every key cooling down, that's treated as a shared-budget
-  exhaustion: wait for the earliest cooldown to clear and try again
-  (bounded to a few rounds) rather than failing immediately.
+- 401/403 (bad/revoked key), 404, and 429 (rate limit) are per-key
+  (really per-org) — rotating to the next key is the correct response.
+- On a 429, Groq reports how long until that key's limit resets
+  ("Please try again in Xh Ym Z.ZZZs" or similar) — that's parsed and
+  used as the actual cooldown instead of a flat guess, since a
+  per-minute limit and a tokens-per-day limit need very different
+  wait times (seconds vs. hours). If every key wants that long, this
+  raises immediately with the shortest real wait time rather than
+  sleeping for it — a multi-hour block belongs in the caller's
+  hands, not silently inside this library.
 """
 
 from __future__ import annotations
@@ -34,7 +43,30 @@ _ENV_PATH = Path(__file__).resolve().parent.parent / ".env.local"
 load_dotenv(_ENV_PATH)
 
 _KEY_PATTERN = re.compile(r"^GROQ_API_KEY(_\d+)?$")
-_COOLDOWN_SECONDS = 30.0
+_DEFAULT_COOLDOWN_SECONDS = 30.0
+
+# Matches Groq's "Please try again in 4h15m24.768s" / "2m52.8s" / "577ms" / "45s"
+_RETRY_AFTER_PATTERN = re.compile(
+    r"try again in\s+(?:(\d+)h)?\s*(?:(\d+)m(?!s))?\s*(?:([\d.]+)s)?\s*(?:([\d.]+)ms)?",
+    re.IGNORECASE,
+)
+
+
+def _parse_retry_after_seconds(message: str) -> float | None:
+    match = _RETRY_AFTER_PATTERN.search(message)
+    if not match or not any(match.groups()):
+        return None
+    hours, minutes, seconds, millis = match.groups()
+    total = 0.0
+    if hours:
+        total += int(hours) * 3600
+    if minutes:
+        total += int(minutes) * 60
+    if seconds:
+        total += float(seconds)
+    if millis:
+        total += float(millis) / 1000
+    return total if total > 0 else None
 
 
 @dataclass
@@ -88,44 +120,30 @@ class GroqKeyPool:
     ) -> str:
         last_error: Exception | None = None
 
-        # This account's rate limit is enforced per-organization, shared
-        # across every key in the pool - rotating keys does nothing for a
-        # genuine 429, only for a dead/revoked individual key. So if a
-        # full pass finds every key cooling down, that's most likely a
-        # shared-budget exhaustion, not 6 independently broken keys -
-        # wait it out and try again a bounded number of times instead of
-        # failing immediately.
-        for _round in range(3):
-            for _ in range(len(self._states)):
-                state = self._next_candidate()
-                if state is None:
-                    break  # every key is cooling down
+        for _ in range(len(self._states)):
+            state = self._next_candidate()
+            if state is None:
+                break  # every key is cooling down
 
-                try:
-                    response = state.client.chat.completions.create(
-                        model=model,
-                        messages=messages,
-                        reasoning_effort=reasoning_effort,
-                        response_format={"type": "json_object"} if json_mode else None,
-                    )
-                    return response.choices[0].message.content or ""
-                except Exception as error:  # noqa: BLE001 — inspect any SDK exception
-                    last_error = error
-                    if not self._is_retryable(error):
-                        raise
-                    state.cooldown_until = time.time() + _COOLDOWN_SECONDS
-            else:
-                continue  # inner loop completed without a `break` -> no candidate was ever None
+            try:
+                response = state.client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    reasoning_effort=reasoning_effort,
+                    response_format={"type": "json_object"} if json_mode else None,
+                )
+                return response.choices[0].message.content or ""
+            except Exception as error:  # noqa: BLE001 — inspect any SDK exception
+                last_error = error
+                if not self._is_retryable(error):
+                    raise
+                retry_after = _parse_retry_after_seconds(str(error))
+                state.cooldown_until = time.time() + (retry_after or _DEFAULT_COOLDOWN_SECONDS)
 
-            # Hit the `break` above (all keys cooling down) - wait for the
-            # earliest one to clear, then start another round.
-            soonest = min(state.cooldown_until for state in self._states)
-            wait_seconds = max(0.0, soonest - time.time())
-            if wait_seconds > 0:
-                time.sleep(wait_seconds)
-
+        soonest_wait = min(state.cooldown_until - time.time() for state in self._states)
         raise RuntimeError(
-            f"All Groq API keys exhausted or on cooldown after retrying. Last error: {last_error}"
+            f"All {len(self._states)} Groq API keys are rate-limited. Soonest available "
+            f"in {max(0.0, soonest_wait):.0f}s. Last error: {last_error}"
         )
 
 
