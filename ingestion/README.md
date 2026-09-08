@@ -23,11 +23,29 @@ python cli.py ingest --writer "<Writer>" --book "<Book>" --paper 1st --path ../D
 python cli.py ingest-board-questions --paper 1st --path ../Data-Source/Board-Questions/1st-Paper/
 ```
 
-Re-running `ingest` for the same writer/book/paper is safe — point IDs are
-deterministic, so it overwrites that book's own chunks rather than
-duplicating them.
+Re-running `ingest` for the same writer/book/paper/chapter is safe — each
+chapter's existing points are deleted before its fresh chunks are inserted
+(point IDs alone aren't a strong enough guarantee, since the structuring
+LLM call isn't guaranteed to produce the same chunk count/order every run).
 
 Each run writes a per-page OCR confidence log to `../logs/`.
+
+## Groq daily quota — check before a big batch
+
+```
+python check_quota.py         # cheap: confirms keys still authenticate
+python check_quota.py --big   # expensive (~20k tokens/key): real daily-headroom check
+```
+
+The 6 `GROQ_API_KEY*` keys are **not one shared pool** — verified
+2026-09-08: 4 belong to 4 distinct Groq orgs, the other 2 share a 5th, so
+there are really 5 independent ~200k-token/day budgets. A single chapter's
+structuring pass (with the adaptive page-batch splitting in `structure.py`)
+costs roughly 20-40k tokens in the clean case — so all 5 pools combined
+can realistically cover maybe 25-50 chapters/day, but repeated debugging
+runs burn through that fast (a day of heavy iteration exhausted nearly the
+full ~1M combined daily budget). Run `check_quota.py --big` before kicking
+off a large batch if you're not sure there's headroom left.
 
 ## Pipeline stages
 
