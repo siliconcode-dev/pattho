@@ -1,7 +1,13 @@
-"""Stage 4 — embedding via BGE-M3 (dense + sparse + ColBERT multi-vector).
+"""Stage 4 — embedding via BGE-M3 (dense + ColBERT multi-vector).
 
-One model, one encode() call produces all three representations the
-Qdrant collection schema (qdrant_store.py) expects.
+One model, one encode() call produces both representations the
+LanceDB table schema (lancedb_store.py) expects. BGE-M3 can also emit
+a sparse lexical-weights vector, but LanceDB has no first-class sparse
+vector column (unlike Qdrant's SparseVectorParams) — its keyword-match
+role is instead covered by LanceDB's own native BM25 full-text index
+over the stored `text` column, built in Phase 2 once retrieval is
+implemented. So `return_sparse` is left off here: it would just be
+computed and discarded.
 """
 
 from __future__ import annotations
@@ -17,7 +23,6 @@ MODEL_NAME = "BAAI/bge-m3"
 @dataclass
 class ChunkEmbedding:
     dense: list[float]
-    sparse: dict[int, float]  # token-id -> weight
     colbert: list[list[float]]  # one 1024-dim vector per token
 
 
@@ -33,17 +38,15 @@ def embed_chunks(texts: list[str]) -> list[ChunkEmbedding]:
     output = model.encode(
         texts,
         return_dense=True,
-        return_sparse=True,
+        return_sparse=False,
         return_colbert_vecs=True,
     )
 
     results = []
     for i in range(len(texts)):
-        sparse_weights = output["lexical_weights"][i]
         results.append(
             ChunkEmbedding(
                 dense=output["dense_vecs"][i].tolist(),
-                sparse={int(token_id): float(w) for token_id, w in sparse_weights.items()},
                 colbert=output["colbert_vecs"][i].tolist(),
             )
         )

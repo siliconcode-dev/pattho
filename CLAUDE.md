@@ -36,7 +36,7 @@ Use `reasoning_effort: low/medium/high` adaptively on both, based on question co
 - Frontend: Next.js on Vercel (free tier)
 - UI: Shadcn components (favor Magic UI's component set specifically), Anime.js v4 for animation
 - Auth/relational/storage: Supabase
-- Vector DB: Qdrant Cloud (free tier — chosen over Supabase/pgvector specifically to avoid the 7-day inactivity pause; **unconfirmed** — see Phase 0 flags, third-party sources suggest Qdrant free tier may also pause on inactivity, mitigated with a keep-alive cron)
+- Vector DB: LanceDB (embedded library, not a hosted service) on Backblaze B2 object storage (10GB free, no card) — replaced Qdrant Cloud 2026-09-08 (4GB free-tier disk too small for the full corpus's ColBERT multivectors; Oracle Always Free self-host blocked by regional ARM capacity shortage). No inactivity-pause risk since there's no server to idle — the earlier keep-alive-cron concern is moot.
 - Embedding model: BGE-M3 (default recommendation — confirm before Phase 1 locks it in)
 - OCR/embedding compute: GCP VM, 4 CPU/12GB RAM, boot-on-demand only — never leave it running idle
 - Backend language/framework: Next.js API routes (TypeScript) for the live chat/RAG path; Python for the GCP VM OCR/embedding ingestion job (Phase 1) — decided at Phase 0 kickoff

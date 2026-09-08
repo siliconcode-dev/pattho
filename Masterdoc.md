@@ -109,7 +109,7 @@
 - **Frontend:** Next.js, deployed on **Vercel free tier**.
 - **UI:** Shadcn components, **Anime.js v4** for animations/transitions.
 - **Auth/relational data/storage:** Supabase (free tier) — used for auth, relational data, and file storage.
-- **Vector database:** **Qdrant Cloud** (1GB free tier, no inactivity pause) — chosen over Supabase/pgvector specifically for the vector layer because it doesn't pause after inactivity, which matters given the intermittent GCP-VM-driven ingestion pattern.
+- **Vector database:** **LanceDB** (embedded library, not a hosted service) writing to **Backblaze B2** object storage (10GB free forever, no card required) — replaced Qdrant Cloud 2026-09-08 once the full Physics corpus's ColBERT multivectors exceeded Qdrant's 4GB free-tier disk and self-hosting hit an Oracle Always Free capacity wall. No inactivity-pause risk either, since there's no server to idle.
 - **Embedding model:** not yet locked, but **BGE-M3** is the recommended default — open-source, MIT-licensed (commercial-use safe), strong multilingual + hybrid dense/sparse retrieval, covers Bangla well. Confirm before Phase 1 of the build plan.
 - **OCR/embedding compute:** Google Cloud VM (4 CPU, 12GB RAM), boot-up/spin-down only when ingesting content (see §3).
 - **Backend language/framework:** delegated to Claude Code's judgment during build (no founder preference stated). Python is worth strong consideration given the RAG/embedding tooling ecosystem, but this is not mandated.

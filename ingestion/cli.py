@@ -24,7 +24,7 @@ from pathlib import Path
 
 from extract import extract_pages
 from ocr import ocr_page
-from qdrant_store import ChunkRecord, delete_chapter, ensure_collection, get_client, upsert_chunks
+from lancedb_store import ChunkRecord, delete_chapter, ensure_table, get_db, upsert_chunks
 from embed import embed_chunks
 from structure import structure_chapter
 
@@ -107,8 +107,8 @@ def _ingest_pdfs(
     structuring call, so a book's ~10 chapters never get crammed into
     one oversized prompt.
     """
-    client = get_client()
-    ensure_collection(client)
+    db = get_db()
+    table = ensure_table(db)
 
     all_confidence_entries: list[dict] = []
     total_chunks = 0
@@ -153,11 +153,11 @@ def _ingest_pdfs(
             for i, chunk in enumerate(chunks)
         ]
 
-        print(f"[{chapter}] Clearing any existing points for this chapter...")
-        delete_chapter(client, writer, book, paper, chapter)
+        print(f"[{chapter}] Clearing any existing rows for this chapter...")
+        delete_chapter(table, writer, book, paper, chapter)
 
-        print(f"[{chapter}] Upserting {len(records)} chunks to Qdrant...")
-        upsert_chunks(client, records, embeddings)
+        print(f"[{chapter}] Writing {len(records)} chunks to LanceDB...")
+        upsert_chunks(table, records, embeddings)
         total_chunks += len(records)
 
     _write_confidence_log(log_name, book, all_confidence_entries)
