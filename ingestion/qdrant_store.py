@@ -49,9 +49,13 @@ class ChunkRecord:
 
 
 def get_client() -> QdrantClient:
+    # prefer_grpc: ColBERT's per-token multivectors make points large, and
+    # Qdrant's REST API JSON-encodes every float as decimal text (~3-4x
+    # bloat vs binary) - gRPC's protobuf encoding avoids that entirely.
     return QdrantClient(
         url=os.environ["QDRANT_URL"],
         api_key=os.environ["QDRANT_API_KEY"],
+        prefer_grpc=True,
     )
 
 
@@ -122,4 +126,52 @@ def upsert_chunks(
             )
         )
 
-    client.upsert(collection_name=COLLECTION_NAME, points=points)
+    _upsert_batch(client, points)
+
+
+def _is_payload_too_large(error: Exception) -> bool:
+    # REST path (qdrant_client.http.exceptions.UnexpectedResponse)
+    status = getattr(error, "status_code", None)
+    content = getattr(error, "content", None)
+    if status == 400 and content and b"larger than allowed" in content:
+        return True
+
+    # gRPC path (grpc.RpcError) — no status_code/content attributes;
+    # surfaces via .code()/.details() instead. RESOURCE_EXHAUSTED is
+    # gRPC's standard code for oversized messages either direction.
+    code_fn = getattr(error, "code", None)
+    details_fn = getattr(error, "details", None)
+    if callable(code_fn) and callable(details_fn):
+        code = code_fn()
+        details = (details_fn() or "").lower()
+        if code is not None and code.name == "RESOURCE_EXHAUSTED":
+            return True
+        if "larger than allowed" in details or "message length" in details:
+            return True
+
+    return False
+
+
+def _upsert_batch(client: QdrantClient, points: list) -> None:
+    """Upserts points, halving the batch and retrying if it's still too
+    large even over gRPC — ColBERT multivectors mean point size varies a
+    lot with chunk text length, so no fixed batch size is safe for every
+    book. Mirrors the same adaptive pattern used for Groq's token limit
+    in structure.py.
+    """
+    if not points:
+        return
+
+    try:
+        client.upsert(collection_name=COLLECTION_NAME, points=points)
+    except Exception as error:  # noqa: BLE001 — only split on the specific too-large case
+        if not _is_payload_too_large(error) or len(points) == 1:
+            raise
+
+        midpoint = len(points) // 2
+        print(
+            f"    (upsert batch of {len(points)} points too large, splitting into "
+            f"{midpoint} + {len(points) - midpoint})"
+        )
+        _upsert_batch(client, points[:midpoint])
+        _upsert_batch(client, points[midpoint:])

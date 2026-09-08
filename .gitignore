@@ -40,7 +40,8 @@ yarn-error.log*
 # vercel
 .vercel
 
-# ingestion source content (large, copyrighted textbook PDFs)
+# ingestion source content (large PDFs — 854MB timed out pushing over
+# HTTPS to GitHub; back to local-only + VM upload/GCS transfer)
 /Data-Source/*
 !/Data-Source/.gitkeep
 !/Data-Source/README.md
