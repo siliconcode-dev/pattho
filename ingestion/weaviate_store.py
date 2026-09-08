@@ -13,21 +13,18 @@ on any overage, which the corpus's actual size makes likely past its
 5GB free tier.
 
 Weaviate Cloud's free tier (changed Oct 2025 to a genuinely permanent
-free plan, not the old 14-day sandbox) sidesteps all of that: it's a
-hosted cluster like Qdrant was, no credit card, 10GB disk, and native
-first-class support for both of the things we needed BGE-M3's sparse
-output and Qdrant's colbert multivector for — hybrid (dense+BM25)
-search and ColBERT-style multivector MaxSim — so there's no bring-
-your-own-storage compatibility risk at all.
+free plan, not the old 14-day sandbox) sidesteps the storage-backend
+problem entirely: it's a hosted cluster like Qdrant was, no credit
+card, 10GB disk. It also has native BM25 full-text search built in, so
+there's no need to bring our own sparse vectors either (see embed.py's
+docstring). ColBERT-style multivector reranking was tried too, but the
+free sandbox forces the `hfresh` vector index (its only HNSW
+alternative is banned there) and `hfresh` doesn't implement multivector
+support server-side yet — confirmed with a live insert error, not just
+docs — so that part of the original design was dropped for v1.
 
-Two vectors per object:
-  - dense   (1024-dim, self-provided, cosine)      -- primary semantic search
-  - colbert (1024-dim multivector, self-provided)  -- MaxSim rerank only
-
-No sparse vector is stored — same reasoning as the LanceDB attempt:
-Weaviate indexes the `text` property for BM25 automatically, which is
-what Phase 2's hybrid search will use instead of BGE-M3's sparse
-lexical weights (see embed.py's docstring).
+One vector per object:
+  - dense (1024-dim, self-provided, cosine, hfresh index)
 
 Idempotency: `delete_chapter` clears every object already tagged with
 a writer/book/paper/chapter before the fresh batch is inserted — the
@@ -87,9 +84,12 @@ def ensure_collection(client: weaviate.WeaviateClient) -> None:
 
     client.collections.create(
         COLLECTION_NAME,
+        # Weaviate Cloud's free-tier sandbox only allows the "hfresh" vector
+        # index (memory-efficient — keeps compressed postings on disk
+        # instead of the full index in RAM, which matters on the 1GB
+        # memory allowance), not the default HNSW.
         vector_config=[
-            Configure.Vectors.self_provided(name="dense"),
-            Configure.MultiVectors.self_provided(name="colbert"),
+            Configure.Vectors.self_provided(name="dense", vector_index_config=Configure.VectorIndex.hfresh()),
         ],
         properties=[
             Property(name="writer", data_type=DataType.TEXT),
@@ -152,10 +152,7 @@ def upsert_chunks(
                 "ocr_confidence": record.ocr_confidence,
                 "text": record.text,
             },
-            vector={
-                "dense": embedding.dense,
-                "colbert": embedding.colbert,
-            },
+            vector={"dense": embedding.dense},
         )
         for record, embedding in zip(records, embeddings)
     ]

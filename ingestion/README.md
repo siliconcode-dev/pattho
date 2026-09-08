@@ -15,9 +15,12 @@ writes LanceDB's commit protocol requires, and Google Cloud Storage
 would bill the founder's live GCP card on any overage. Weaviate Cloud's
 free tier (genuinely permanent since Oct 2025, not the old 14-day
 sandbox) is a hosted cluster like Qdrant was — no credit card, 10GB
-disk, 100k objects — with native hybrid (dense+BM25) search and
-ColBERT-style multivector MaxSim built in, so there's no storage-backend
-compatibility risk at all. See `weaviate_store.py`'s docstring.
+disk, 100k objects — with native hybrid (dense+BM25) search built in,
+so there's no need to bring our own sparse vectors. ColBERT-style
+multivector reranking was tried too, but the free tier's mandatory
+`hfresh` vector index doesn't support multivectors server-side yet
+(confirmed with a live error) — dropped for v1 as a result. See
+`weaviate_store.py`'s docstring.
 
 1. Sign up at console.weaviate.cloud (no card needed).
 2. Create a cluster (Database → Create a cluster → free Sandbox tier).
@@ -78,7 +81,7 @@ off a large batch if you're not sure there's headroom left.
 | 1. Extract | `extract.py` | PyMuPDF text-layer detection; rasterizes pages that need OCR |
 | 2. OCR | `ocr.py` | Google Cloud Vision (DOCUMENT_TEXT_DETECTION) — see `GCP_RUNBOOK.md` for one-time setup |
 | 3. Structure | `structure.py` | Groq cleanup + topic/subtopic/worked-example segmentation (chapter comes from the source filename) |
-| 4. Embed | `embed.py` | BGE-M3 dense + ColBERT (no sparse — see file docstring) |
+| 4. Embed | `embed.py` | BGE-M3 dense only (no sparse, no ColBERT — see file docstring) |
 | 5. Store | `weaviate_store.py` | Collection schema + idempotent upsert, on Weaviate Cloud |
 
 OCR was originally planned as self-hosted (PaddleOCR, then EasyOCR), but

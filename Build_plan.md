@@ -37,7 +37,7 @@ Pilot content scope for the whole plan: **HSC Science group, Physics 1st & 2nd P
 
 **Goal:** a working backend that takes a student question and returns a grounded, cited, streamed answer.
 
-- Build retrieval: query → embed → Weaviate search (hybrid dense+BM25, ColBERT multivector rerank) → assemble context, respecting the metadata schema (e.g., filter by subject/paper when known).
+- Build retrieval: query → embed → Weaviate hybrid search (dense+BM25) → assemble context, respecting the metadata schema (e.g., filter by subject/paper when known). *(ColBERT multivector reranking was dropped 2026-09-08 — Weaviate's free-tier vector index doesn't support it server-side yet; revisit if a paid tier or self-hosted Weaviate is ever adopted.)*
 - Implement the **Flash/Complex model split**: `openai/gpt-oss-20b` for Flash, `openai/gpt-oss-120b` for Complex, both user-selectable.
 - Implement **adaptive `reasoning_effort`** (low/medium/high) based on question complexity — don't hardcode one level.
 - Do **not** add explicit chain-of-thought prompting ("think step by step") — rely on `reasoning_effort` and let the model reason internally per Masterdoc §4.

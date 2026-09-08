@@ -1,13 +1,25 @@
-"""Stage 4 — embedding via BGE-M3 (dense + ColBERT multi-vector).
+"""Stage 4 — embedding via BGE-M3 (dense only).
 
-One model, one encode() call produces both representations the
-LanceDB table schema (lancedb_store.py) expects. BGE-M3 can also emit
-a sparse lexical-weights vector, but LanceDB has no first-class sparse
-vector column (unlike Qdrant's SparseVectorParams) — its keyword-match
-role is instead covered by LanceDB's own native BM25 full-text index
-over the stored `text` column, built in Phase 2 once retrieval is
-implemented. So `return_sparse` is left off here: it would just be
-computed and discarded.
+BGE-M3 can also emit sparse lexical-weights and ColBERT-style
+per-token multivectors, but neither made it into the final vector
+store design (2026-09-08):
+
+- Sparse: Weaviate Cloud has no first-class sparse vector column
+  (unlike Qdrant's SparseVectorParams). Its keyword-match role is
+  instead covered by Weaviate's own native BM25 full-text index over
+  the stored `text` property, used in Phase 2's hybrid search.
+- ColBERT multivector: Weaviate's free-tier sandbox forces the
+  memory-efficient `hfresh` vector index (its only allowed HNSW
+  alternative is banned there), but `hfresh` doesn't implement
+  multivector support server-side yet — confirmed with a live error
+  (`*hfresh.HFresh is not common.VectorIndexMulti`), not just docs.
+  Late-interaction reranking is dropped for v1 as a result; dense +
+  BM25 hybrid is still a solid retrieval baseline. Revisit if the
+  founder ever pays for a Weaviate tier or self-hosts open-source
+  Weaviate, where HNSW (and multivector) would be available.
+
+So `return_sparse` and `return_colbert_vecs` are both left off — they
+would just be computed and discarded.
 """
 
 from __future__ import annotations
@@ -23,7 +35,6 @@ MODEL_NAME = "BAAI/bge-m3"
 @dataclass
 class ChunkEmbedding:
     dense: list[float]
-    colbert: list[list[float]]  # one 1024-dim vector per token
 
 
 @lru_cache(maxsize=1)
@@ -39,15 +50,6 @@ def embed_chunks(texts: list[str]) -> list[ChunkEmbedding]:
         texts,
         return_dense=True,
         return_sparse=False,
-        return_colbert_vecs=True,
+        return_colbert_vecs=False,
     )
-
-    results = []
-    for i in range(len(texts)):
-        results.append(
-            ChunkEmbedding(
-                dense=output["dense_vecs"][i].tolist(),
-                colbert=output["colbert_vecs"][i].tolist(),
-            )
-        )
-    return results
+    return [ChunkEmbedding(dense=vec.tolist()) for vec in output["dense_vecs"]]
