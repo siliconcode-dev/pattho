@@ -28,7 +28,11 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env.local")
 
 COLLECTION_NAME = "pattho_physics"
 DENSE_SIZE = 1024
-COLBERT_SIZE = 128
+# BGE-M3's colbert_vecs are 1024-dim (matches its dense hidden size),
+# not the 128-dim used by classic ColBERT — confirmed from a real
+# Qdrant dimension-mismatch error, not just assumed from general
+# ColBERT knowledge.
+COLBERT_SIZE = 1024
 
 
 @dataclass
