@@ -67,6 +67,13 @@ class StructuredChunk:
 
 
 def _should_split_and_retry(error: Exception) -> bool:
+    if isinstance(error, ValueError):
+        # Our own shape-validation failure (see _structure_batch) — the
+        # model produced syntactically valid but structurally wrong
+        # JSON (e.g. a double-encoded "chunks" string). Same remedy as
+        # the Groq-reported cases: smaller/different retry, then skip.
+        return True
+
     status = getattr(error, "status_code", None) or getattr(error, "status", None)
     if status == 413:
         return True  # request itself too large for the per-request token limit
@@ -96,21 +103,27 @@ def _structure_batch(batch_text: str, reasoning_effort: str = "medium") -> list[
 
     try:
         parsed = json.loads(raw)["chunks"]
-    except (json.JSONDecodeError, KeyError) as error:
+        if isinstance(parsed, str):
+            # Some completions double-encode: {"chunks": "[{...}]"}
+            # instead of {"chunks": [{...}]}. Unwrap it once.
+            parsed = json.loads(parsed)
+        if not isinstance(parsed, list):
+            raise ValueError(f"'chunks' was {type(parsed).__name__}, expected a list")
+
+        return [
+            StructuredChunk(
+                topic=item["topic"],
+                subtopic=item.get("subtopic"),
+                chunk_type=item["chunk_type"],
+                text=item["text"],
+            )
+            for item in parsed
+        ]
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
         raise ValueError(
             f"Structuring pass did not return the expected JSON shape: {error}\n"
             f"Raw output: {raw[:500]}"
         ) from error
-
-    return [
-        StructuredChunk(
-            topic=item["topic"],
-            subtopic=item.get("subtopic"),
-            chunk_type=item["chunk_type"],
-            text=item["text"],
-        )
-        for item in parsed
-    ]
 
 
 def structure_chapter(page_texts: list[str]) -> list[StructuredChunk]:
